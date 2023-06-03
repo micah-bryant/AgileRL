@@ -206,7 +206,11 @@ class SAC():
         self.critic_optimizer = optim.Adam(critic_params, lr=self.lr)
         self.criterion = nn.MSELoss()
 
-    def getAction(self, state: np.ndarray, epsilon = None)->np.ndarray:
+    def getAction(self, 
+                  state: np.ndarray, 
+                  epsilon: float = None, 
+                  training: bool = True
+                  )->np.ndarray:
         """Returns the next action to take in the environment.
 
         :param state: Environment observation, or multiple observations in a batch
@@ -223,27 +227,26 @@ class SAC():
         if len(state.size()) < 2:
             state = state.unsqueeze(0)       
 
-        self.actor.eval()
-        with torch.no_grad():
-            action_values = self.actor(state)
-        self.actor.train()
-
-        # Concern here on logic if action_space is multi-dimensional
-        # May need to test on environment with multi-dimensional action space
-        action_values = action_values[:self.action_dim]
+        action_values, _ = self.sampleAction(state, training)
 
         action = action_values.cpu().data.numpy()
 
         return action
     
     
-    def sampleAction(self, actor_output: torch.Tensor, training: bool = True, epsilon = 1e-6):
+    def sampleAction(self, 
+                     state: torch.Tensor, 
+                     training: bool = True, 
+                     epsilon: float = 1e-6
+                     )->tuple[torch.Tensor, torch.Tensor]:
+        actor_output = self.actor(state)
         # Concern here if action dimension is multidimensional
         mean = actor_output[:self.action_dim]
         log_std = actor_output[self.action_dim:]
         log_std = torch.clamp(log_std, self.log_std_min, self.log_std_max)
         
         action_distribution = Normal(mean, log_std)
+        
         if training:
             action = action_distribution.rsample()
         else:
@@ -254,8 +257,6 @@ class SAC():
         action = torch.tanh(action)
         
         return action, action_prob
-        
-        
         
 
     def learn(self, experiences, noise_clip=0.5, policy_noise=0.2):
@@ -282,24 +283,14 @@ class SAC():
         elif self.net_config['arch'] == 'cnn':
             q_value = self.critic(states, actions)
 
-        next_actions = self.actor(next_states)
-        noise = actions.data.normal_(0, policy_noise).to(self.device)
-        noise = noise.clamp(-noise_clip, noise_clip)
-        next_actions = (next_actions + noise)
 
-        if self.net_config['arch'] == 'mlp':
-            next_input_combined = torch.cat([next_states, next_actions], 1)
-            q_value_next_state = self.critic_target(next_input_combined)
-        elif self.net_config['arch'] == 'cnn':
-            q_value_next_state = self.critic(next_states, next_actions)
 
-        y_j = rewards + (self.gamma * q_value_next_state).detach()
 
-        critic_loss = self.criterion(q_value, y_j)
+        # critic_loss = self.criterion(q_value, y_j)
 
         # critic loss backprop
         self.critic_optimizer.zero_grad()
-        critic_loss.backward()
+        # critic_loss.backward()
         self.critic_optimizer.step()
 
         # update actor and targets every policy_freq episodes
@@ -317,8 +308,8 @@ class SAC():
             actor_loss.backward()
             self.actor_optimizer.step()
 
-            self.softUpdate(self.actor, self.actor_target)
-            self.softUpdate(self.critic, self.critic_target)
+            self.softUpdate(self.critic1, self.critic1_target)
+            self.softUpdate(self.critic2, self.critic2_target)
 
     def softUpdate(self, net, target):
         """Soft updates target network.
@@ -380,9 +371,10 @@ class SAC():
                            )
 
         clone.actor = self.actor.clone().to(self.device)
-        clone.actor_target = self.actor_target.clone().to(self.device)
-        clone.critic = self.critic.clone().to(self.device)
-        clone.critic_target = self.critic_target.clone().to(self.device)
+        clone.critic1 = self.critic1.clone().to(self.device)
+        clone.critic1_target = self.critic1_target.clone().to(self.device)
+        clone.critic2 = self.critic2.clone().to(self.device)
+        clone.critic2_target = self.critic2_target.clone().to(self.device)
 
         clone.actor_optimizer = optim.Adam(
             clone.actor.parameters(), lr=clone.lr)
